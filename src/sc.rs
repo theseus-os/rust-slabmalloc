@@ -103,6 +103,10 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.empty_slabs.insert_front(new_head);
     }
 
+    fn remove_empty(&mut self) -> Option<&'a mut P> {
+        self.empty_slabs.pop()
+    }
+
     /// Move a page from `slabs` to `empty_slabs`.
     fn move_to_empty(&mut self, page: &'a mut P) {
         let page_ptr = page as *const P;
@@ -164,7 +168,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
             let ptr = slab_page.allocate(sc_layout);
             if !ptr.is_null() {
                 if slab_page.is_full() {
-                    trace!("move {:p} partial -> full", slab_page);
+                    // trace!("move {:p} partial -> full", slab_page);
                     self.move_partial_to_full(slab_page);
                 }
                 return ptr;
@@ -188,6 +192,10 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.insert_empty(page);
     }
 
+    pub fn return_page(&mut self) -> Option<&'a mut P> {
+        self.remove_empty()
+    }
+
     /// Allocates a block of memory descriped by `layout`.
     ///
     /// Returns a pointer to a valid region of memory or an
@@ -196,11 +204,12 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     /// The function may also move around pages between lists
     /// (empty -> partial or partial -> full).
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
-        trace!(
-            "SCAllocator({}) is trying to allocate {:?}",
-            self.size,
-            layout
-        );
+        // trace!(
+        //     "SCAllocator({}) is trying to allocate {:?}, {}",
+        //     self.size,
+        //     layout, 
+        //     P::SIZE - CACHE_LINE_SIZE
+        // );
         assert!(layout.size() <= self.size);
         assert!(self.size <= (P::SIZE - CACHE_LINE_SIZE));
         let new_layout = unsafe { Layout::from_size_align_unchecked(self.size, layout.align()) };
@@ -218,11 +227,11 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
                 let ptr = empty_page.allocate(layout);
                 debug_assert!(!ptr.is_null(), "Allocation must have succeeded here.");
 
-                trace!(
-                    "move {:p} empty -> partial empty count {}",
-                    empty_page,
-                    self.empty_slabs.elements
-                );
+                // trace!(
+                //     "move {:p} empty -> partial empty count {}",
+                //     empty_page,
+                //     self.empty_slabs.elements
+                // );
                 // Move empty page to partial pages
                 self.insert_partial_slab(empty_page);
                 ptr
@@ -234,11 +243,11 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         let res = NonNull::new(ptr).ok_or(AllocationError::OutOfMemory);
 
         if !ptr.is_null() {
-            trace!(
-                "SCAllocator({}) allocated ptr=0x{:x}",
-                self.size,
-                ptr as usize
-            );
+            // trace!(
+            //     "SCAllocator({}) allocated ptr=0x{:x}",
+            //     self.size,
+            //     ptr as usize
+            // );
         }
 
         res
@@ -252,13 +261,13 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), AllocationError> {
         assert!(layout.size() <= self.size);
         assert!(self.size <= (P::SIZE - CACHE_LINE_SIZE));
-        trace!(
-            "SCAllocator({}) is trying to deallocate ptr = {:p} layout={:?} P.size= {}",
-            self.size,
-            ptr,
-            layout,
-            P::SIZE
-        );
+        // trace!(
+        //     "SCAllocator({}) is trying to deallocate ptr = {:p} layout={:?} P.size= {}",
+        //     self.size,
+        //     ptr,
+        //     layout,
+        //     P::SIZE
+        // );
 
         let page = (ptr.as_ptr() as usize) & !(P::SIZE - 1) as usize;
 
@@ -273,11 +282,11 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
 
         if slab_page.is_empty(self.obj_per_page) {
             // We need to move it from self.slabs -> self.empty_slabs
-            trace!("move {:p} partial -> empty", slab_page);
+            // trace!("move {:p} partial -> empty", slab_page);
             self.move_to_empty(slab_page);
         } else if slab_page_was_full {
             // We need to move it from self.full_slabs -> self.slabs
-            trace!("move {:p} full -> partial", slab_page);
+            // trace!("move {:p} full -> partial", slab_page);
             self.move_full_to_partial(slab_page);
         }
 
