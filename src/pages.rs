@@ -365,7 +365,7 @@ pub struct ObjectPage8k<'a> {
 
 impl<'a> ObjectPage8k<'a> {
     /// clears the metadata section of the page
-    pub fn clear(&mut self) {
+    pub fn clear_metadata(&mut self) {
         self.heap_id = 0;
         self.next = Rawlink::default();
         self.prev = Rawlink::default();
@@ -404,7 +404,7 @@ impl<'a> Default for ObjectPage8k<'a> {
 
 impl<'a> fmt::Debug for ObjectPage8k<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ObjectPage")
+        write!(f, "ObjectPage8k")
     }
 }
 

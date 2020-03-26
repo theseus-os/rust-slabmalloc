@@ -192,6 +192,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.insert_empty(page);
     }
 
+    /// Returns an empty page from the allocator if available
     pub fn return_page(&mut self) -> Option<&'a mut P> {
         self.remove_empty()
     }

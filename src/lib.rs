@@ -17,6 +17,11 @@
 //!
 //! # Implementing GlobalAlloc
 //! See the [global alloc](https://github.com/gz/rust-slabmalloc/tree/master/examples/global_alloc.rs) example.
+//! 
+//! # Theseus 
+//! Some changes made for the Theseus OS heap:
+//!  * A `ObjectPage8k` that is 8 KiB in size and contains allocated objects and associated meta-data.
+//!  * return_page() function which allow the ZoneAllocator to return empty pages on request.
 #![allow(unused_features)]
 #![cfg_attr(feature = "unstable", feature(const_fn))]
 #![cfg_attr(
