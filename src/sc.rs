@@ -188,7 +188,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         page.bitfield_mut().initialize(self.size, P::SIZE - 80);
         *page.prev() = Rawlink::none();
         *page.next() = Rawlink::none();
-        trace!("adding page to SCAllocator {:p}", page);
+        // trace!("adding page to SCAllocator {:p}", page);
         self.insert_empty(page);
     }
 

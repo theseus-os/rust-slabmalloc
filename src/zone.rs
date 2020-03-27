@@ -56,6 +56,7 @@ impl<'a> Default for ZoneAllocator<'a> {
     }
 }
 
+#[allow(dead_code)]
 enum Slab {
     Base(usize),
     Large(usize),

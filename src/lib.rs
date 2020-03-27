@@ -61,7 +61,7 @@ use core::fmt;
 use core::mem;
 use core::ptr::{self, NonNull};
 
-use log::trace;
+// use log::trace;
 
 #[cfg(target_arch = "x86_64")]
 const CACHE_LINE_SIZE: usize = 64;
