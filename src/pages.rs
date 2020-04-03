@@ -8,6 +8,7 @@ pub(crate) trait Bitfield {
         base_addr: usize,
         layout: Layout,
         page_size: usize,
+        metadata_size: usize,
     ) -> Option<(usize, usize)>;
     fn is_allocated(&self, idx: usize) -> bool;
     fn set_bit(&mut self, idx: usize);
@@ -49,6 +50,7 @@ impl Bitfield for [u64] {
         base_addr: usize,
         layout: Layout,
         page_size: usize,
+        metadata_size: usize
     ) -> Option<(usize, usize)> {
         for (base_idx, b) in self.iter().enumerate() {
             let bitval = *b;
@@ -61,7 +63,7 @@ impl Bitfield for [u64] {
                 let offset = idx * layout.size();
 
                 // TODO(bad): psize needs to be passed as arg
-                let offset_inside_data_area = offset <= (page_size - 80 - layout.size());
+                let offset_inside_data_area = offset <= (page_size - metadata_size - layout.size());
                 if !offset_inside_data_area {
                     return None;
                 }
@@ -155,6 +157,15 @@ pub trait AllocablePage {
     /// We also assume that the address of the page will be aligned to `SIZE`.
     const SIZE: usize;
 
+    const METADATA_SIZE: usize;
+
+    const HEAP_ID_OFFSET: usize;
+
+    fn new(mp: MappedPages, heap_id: usize) -> Result<Self, &'static str>
+    where
+        Self: core::marker::Sized;
+    fn retrieve_mapped_pages(&mut self) -> MappedPages;
+    fn clear_metadata(&mut self);
     fn bitfield(&self) -> &[u64; 8];
     fn bitfield_mut(&mut self) -> &mut [u64; 8];
     fn prev(&mut self) -> &mut Rawlink<Self>
@@ -163,11 +174,12 @@ pub trait AllocablePage {
     fn next(&mut self) -> &mut Rawlink<Self>
     where
         Self: core::marker::Sized;
+    fn buffer_size() -> usize;
 
     /// Tries to find a free block within `data` that satisfies `alignment` requirement.
     fn first_fit(&self, layout: Layout) -> Option<(usize, usize)> {
         let base_addr = (&*self as *const Self as *const u8) as usize;
-        self.bitfield().first_fit(base_addr, layout, Self::SIZE)
+        self.bitfield().first_fit(base_addr, layout, Self::SIZE, Self::METADATA_SIZE)
     }
 
     /// Tries to allocate an object within this page.
@@ -194,7 +206,7 @@ pub trait AllocablePage {
     }
 
     /// Deallocates a memory object within this page.
-    fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), AllocationError> {
+    fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
         // trace!(
         //     "AllocablePage deallocating ptr = {:p} with {:?}",
         //     ptr,
@@ -214,127 +226,6 @@ pub trait AllocablePage {
     }
 }
 
-/// Holds allocated data within a 2 MiB page.
-///
-/// Has a data-section where objects are allocated from
-/// and a small amount of meta-data in form of a bitmap
-/// to track allocations at the end of the page.
-///
-/// # Notes
-/// An object of this type will be exactly 2 MiB.
-/// It is marked `repr(C)` because we rely on a well defined order of struct
-/// members (e.g., dealloc does a cast to find the bitfield).
-#[repr(C)]
-pub struct LargeObjectPage<'a> {
-    /// Holds memory objects.
-    #[allow(dead_code)]
-    data: [u8; (2 * 1024 * 1024) - 80],
-
-    /// Next element in list (used by `PageList`).
-    next: Rawlink<LargeObjectPage<'a>>,
-    prev: Rawlink<LargeObjectPage<'a>>,
-
-    /// A bit-field to track free/allocated memory within `data`.
-    pub(crate) bitfield: [u64; 8],
-}
-
-// These needs some more work to be really safe...
-unsafe impl<'a> Send for LargeObjectPage<'a> {}
-unsafe impl<'a> Sync for LargeObjectPage<'a> {}
-
-impl<'a> AllocablePage for LargeObjectPage<'a> {
-    const SIZE: usize = LARGE_PAGE_SIZE;
-
-    fn bitfield(&self) -> &[u64; 8] {
-        &self.bitfield
-    }
-
-    fn bitfield_mut(&mut self) -> &mut [u64; 8] {
-        &mut self.bitfield
-    }
-
-    fn prev(&mut self) -> &mut Rawlink<Self> {
-        &mut self.prev
-    }
-
-    fn next(&mut self) -> &mut Rawlink<Self> {
-        &mut self.next
-    }
-}
-
-impl<'a> Default for LargeObjectPage<'a> {
-    fn default() -> LargeObjectPage<'a> {
-        unsafe { mem::MaybeUninit::zeroed().assume_init() }
-    }
-}
-
-impl<'a> fmt::Debug for LargeObjectPage<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "LargeObjectPage")
-    }
-}
-
-/// Holds allocated data within a 4 KiB page.
-///
-/// Has a data-section where objects are allocated from
-/// and a small amount of meta-data in form of a bitmap
-/// to track allocations at the end of the page.
-///
-/// # Notes
-/// An object of this type will be exactly 4 KiB.
-/// It is marked `repr(C)` because we rely on a well defined order of struct
-/// members (e.g., dealloc does a cast to find the bitfield).
-#[repr(C)]
-pub struct ObjectPage<'a> {
-    /// Holds memory objects.
-    #[allow(dead_code)]
-    data: [u8; 4096 - 88],
-
-    pub heap_id: usize,
-
-    /// Next element in list (used by `PageList`).
-    next: Rawlink<ObjectPage<'a>>,
-    /// Previous element in  list (used by `PageList`)
-    prev: Rawlink<ObjectPage<'a>>,
-
-    /// A bit-field to track free/allocated memory within `data`.
-    pub(crate) bitfield: [u64; 8],
-}
-
-// These needs some more work to be really safe...
-unsafe impl<'a> Send for ObjectPage<'a> {}
-unsafe impl<'a> Sync for ObjectPage<'a> {}
-
-impl<'a> AllocablePage for ObjectPage<'a> {
-    const SIZE: usize = BASE_PAGE_SIZE;
-
-    fn bitfield(&self) -> &[u64; 8] {
-        &self.bitfield
-    }
-    fn bitfield_mut(&mut self) -> &mut [u64; 8] {
-        &mut self.bitfield
-    }
-
-    fn prev(&mut self) -> &mut Rawlink<Self> {
-        &mut self.prev
-    }
-
-    fn next(&mut self) -> &mut Rawlink<Self> {
-        &mut self.next
-    }
-}
-
-impl<'a> Default for ObjectPage<'a> {
-    fn default() -> ObjectPage<'a> {
-        unsafe { mem::MaybeUninit::zeroed().assume_init() }
-    }
-}
-
-impl<'a> fmt::Debug for ObjectPage<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ObjectPage")
-    }
-}
 
 /// Holds allocated data within 2 4-KiB pages.
 ///
@@ -350,7 +241,9 @@ impl<'a> fmt::Debug for ObjectPage<'a> {
 pub struct ObjectPage8k<'a> {
     /// Holds memory objects.
     #[allow(dead_code)]
-    data: [u8; 8192 - 88],
+    data: [u8; ObjectPage8k::SIZE -ObjectPage8k::METADATA_SIZE],
+    
+    pub mp: MappedPages,
 
     pub heap_id: usize,
 
@@ -363,15 +256,6 @@ pub struct ObjectPage8k<'a> {
     pub(crate) bitfield: [u64; 8],
 }
 
-impl<'a> ObjectPage8k<'a> {
-    /// clears the metadata section of the page
-    pub fn clear_metadata(&mut self) {
-        self.heap_id = 0;
-        self.next = Rawlink::default();
-        self.prev = Rawlink::default();
-        self.bitfield = [0;8];
-    }
-}
 
 // These needs some more work to be really safe...
 unsafe impl<'a> Send for ObjectPage8k<'a> {}
@@ -379,6 +263,56 @@ unsafe impl<'a> Sync for ObjectPage8k<'a> {}
 
 impl<'a> AllocablePage for ObjectPage8k<'a> {
     const SIZE: usize = 8192;
+    const METADATA_SIZE: usize = 88 + core::mem::size_of::<MappedPages>();
+    const HEAP_ID_OFFSET: usize = Self::SIZE - 88;
+
+    /// Creates a new 8KiB allocable page and stores the MappedPages object in the metadata portion.
+    /// This function checks that the given mapped pages is aligned at a 8KiB boundary, writable and has a size of 8KiB.
+    fn new(mp: MappedPages, heap_id: usize) -> Result<ObjectPage8k<'a>, &'static str> {
+        let vaddr = mp.start_address().value();
+        
+        if vaddr % Self::SIZE != 0 {
+            error!("The mapped pages for the heap are not aligned at 8k bytes");
+            return Err("The mapped pages for the heap are not aligned at 8k bytes");
+        }
+
+        // check that the mapped pages is writable
+        if !mp.flags().is_writable() {
+            error!("Tried to convert to an allocable page but MappedPages weren't writable (flags: {:?})",  mp.flags());
+            return Err("Trying to create an allocable page but MappedPages were not writable");
+        }
+        
+        // check that the mapped pages size is equal in size to the page
+        if Self::SIZE != mp.size_in_bytes() {
+            error!("MappedPages of size {} cannot be converted to an allocable page", mp.size_in_bytes());
+            return Err("MappedPages size does not equal allocable page size");
+        }
+
+        Ok( ObjectPage8k {
+            data: [0; ObjectPage8k::SIZE -ObjectPage8k::METADATA_SIZE],
+            mp: mp,
+            heap_id: heap_id,
+            next: Rawlink::default(),
+            prev: Rawlink::default(),
+            bitfield: [0;8],
+        })
+    }
+
+    /// Returns the MappedPages object that was stored in the metadata portion of the page,
+    /// by swapping with an empty MappedPages object.
+    fn retrieve_mapped_pages(&mut self) -> MappedPages {
+        let mut mp = MappedPages::empty();
+        core::mem::swap(&mut self.mp, &mut mp);
+        mp
+    }
+
+    /// clears the metadata section of the page
+    fn clear_metadata(&mut self) {
+        self.heap_id = 0;
+        self.next = Rawlink::default();
+        self.prev = Rawlink::default();
+        self.bitfield = [0;8];
+    }
 
     fn bitfield(&self) -> &[u64; 8] {
         &self.bitfield
@@ -393,6 +327,10 @@ impl<'a> AllocablePage for ObjectPage8k<'a> {
 
     fn next(&mut self) -> &mut Rawlink<Self> {
         &mut self.next
+    }
+
+    fn buffer_size() -> usize {
+        ObjectPage8k::SIZE - ObjectPage8k::METADATA_SIZE
     }
 }
 
@@ -604,3 +542,127 @@ impl<T> Rawlink<T> {
         mem::replace(self, Rawlink::none())
     }
 }
+
+
+
+// /// Holds allocated data within a 2 MiB page.
+// ///
+// /// Has a data-section where objects are allocated from
+// /// and a small amount of meta-data in form of a bitmap
+// /// to track allocations at the end of the page.
+// ///
+// /// # Notes
+// /// An object of this type will be exactly 2 MiB.
+// /// It is marked `repr(C)` because we rely on a well defined order of struct
+// /// members (e.g., dealloc does a cast to find the bitfield).
+// #[repr(C)]
+// pub struct LargeObjectPage<'a> {
+//     /// Holds memory objects.
+//     #[allow(dead_code)]
+//     data: [u8; (2 * 1024 * 1024) - 80],
+
+//     /// Next element in list (used by `PageList`).
+//     next: Rawlink<LargeObjectPage<'a>>,
+//     prev: Rawlink<LargeObjectPage<'a>>,
+
+//     /// A bit-field to track free/allocated memory within `data`.
+//     pub(crate) bitfield: [u64; 8],
+// }
+
+// // These needs some more work to be really safe...
+// unsafe impl<'a> Send for LargeObjectPage<'a> {}
+// unsafe impl<'a> Sync for LargeObjectPage<'a> {}
+
+// impl<'a> AllocablePage for LargeObjectPage<'a> {
+//     const SIZE: usize = LARGE_PAGE_SIZE;
+
+//     fn bitfield(&self) -> &[u64; 8] {
+//         &self.bitfield
+//     }
+
+//     fn bitfield_mut(&mut self) -> &mut [u64; 8] {
+//         &mut self.bitfield
+//     }
+
+//     fn prev(&mut self) -> &mut Rawlink<Self> {
+//         &mut self.prev
+//     }
+
+//     fn next(&mut self) -> &mut Rawlink<Self> {
+//         &mut self.next
+//     }
+// }
+
+// impl<'a> Default for LargeObjectPage<'a> {
+//     fn default() -> LargeObjectPage<'a> {
+//         unsafe { mem::MaybeUninit::zeroed().assume_init() }
+//     }
+// }
+
+// impl<'a> fmt::Debug for LargeObjectPage<'a> {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         write!(f, "LargeObjectPage")
+//     }
+// }
+
+// /// Holds allocated data within a 4 KiB page.
+// ///
+// /// Has a data-section where objects are allocated from
+// /// and a small amount of meta-data in form of a bitmap
+// /// to track allocations at the end of the page.
+// ///
+// /// # Notes
+// /// An object of this type will be exactly 4 KiB.
+// /// It is marked `repr(C)` because we rely on a well defined order of struct
+// /// members (e.g., dealloc does a cast to find the bitfield).
+// #[repr(C)]
+// pub struct ObjectPage<'a> {
+//     /// Holds memory objects.
+//     #[allow(dead_code)]
+//     data: [u8; 4096 - 88],
+
+//     pub heap_id: usize,
+
+//     /// Next element in list (used by `PageList`).
+//     next: Rawlink<ObjectPage<'a>>,
+//     /// Previous element in  list (used by `PageList`)
+//     prev: Rawlink<ObjectPage<'a>>,
+
+//     /// A bit-field to track free/allocated memory within `data`.
+//     pub(crate) bitfield: [u64; 8],
+// }
+
+// // These needs some more work to be really safe...
+// unsafe impl<'a> Send for ObjectPage<'a> {}
+// unsafe impl<'a> Sync for ObjectPage<'a> {}
+
+// impl<'a> AllocablePage for ObjectPage<'a> {
+//     const SIZE: usize = BASE_PAGE_SIZE;
+
+//     fn bitfield(&self) -> &[u64; 8] {
+//         &self.bitfield
+//     }
+//     fn bitfield_mut(&mut self) -> &mut [u64; 8] {
+//         &mut self.bitfield
+//     }
+
+//     fn prev(&mut self) -> &mut Rawlink<Self> {
+//         &mut self.prev
+//     }
+
+//     fn next(&mut self) -> &mut Rawlink<Self> {
+//         &mut self.next
+//     }
+// }
+
+// impl<'a> Default for ObjectPage<'a> {
+//     fn default() -> ObjectPage<'a> {
+//         unsafe { mem::MaybeUninit::zeroed().assume_init() }
+//     }
+// }
+
+// impl<'a> fmt::Debug for ObjectPage<'a> {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         write!(f, "ObjectPage")
+//     }
+// }

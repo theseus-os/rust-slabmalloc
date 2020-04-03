@@ -63,7 +63,7 @@ macro_rules! new_sc_allocator {
     ($size:expr) => {
         SCAllocator {
             size: $size,
-            obj_per_page: cmin((P::SIZE - 80) / $size, 8 * 64),
+            obj_per_page: cmin((P::SIZE - P::METADATA_SIZE) / $size, 8 * 64),
             empty_slabs: PageList::new(),
             slabs: PageList::new(),
             full_slabs: PageList::new(),
@@ -180,21 +180,42 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         ptr::null_mut()
     }
 
+    /// Creates an allocable page given a MappedPages object and returns a reference to the allocable page.
+    /// The MappedPages object is stored within the metadata of the allocable page.
+    fn create_allocable_page(mp: MappedPages, heap_id: usize) -> Result<&'a mut P, &'static str> {
+        let vaddr = mp.start_address().value();
+
+        // create page and store the MappedPages object
+        let page = P::new(mp, heap_id)?;
+        let page_ref: &'a mut P = unsafe { core::mem::transmute(vaddr) } ; // not unsafe because the allocable page was only create by a mapped page that fit the criteria
+        unsafe { (page_ref as *mut P).write(page); }
+
+        Ok(page_ref) 
+    }
+
     /// Refill the SCAllocator
-    ///
-    /// # Safety
-    /// ObjectPage needs to be empty etc.
-    pub unsafe fn refill(&mut self, page: &'a mut P) {
-        page.bitfield_mut().initialize(self.size, P::SIZE - 80);
+    pub fn refill(&mut self, mp: MappedPages, heap_id: usize) -> Result<(), &'static str> {
+        let page = Self::create_allocable_page(mp, heap_id)?;
+        page.bitfield_mut().initialize(self.size, P::SIZE - P::METADATA_SIZE);
         *page.prev() = Rawlink::none();
         *page.next() = Rawlink::none();
         // trace!("adding page to SCAllocator {:p}", page);
         self.insert_empty(page);
+
+        Ok(())
     }
 
-    /// Returns an empty page from the allocator if available
-    pub fn return_page(&mut self) -> Option<&'a mut P> {
-        self.remove_empty()
+    /// Returns an empty page from the allocator if available.
+    /// It removes the MappedPages object from the heap pages where it is stored.
+    pub fn retrieve_empty_page(&mut self) -> Option<MappedPages> {
+        match self.remove_empty(){
+            Some(page) => {
+                Some(page.retrieve_mapped_pages())
+            }
+            None => {
+                None
+            }
+        }
     }
 
     /// Allocates a block of memory descriped by `layout`.
@@ -204,7 +225,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     ///
     /// The function may also move around pages between lists
     /// (empty -> partial or partial -> full).
-    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocationError> {
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, &'static str> {
         // trace!(
         //     "SCAllocator({}) is trying to allocate {:?}, {}",
         //     self.size,
@@ -241,15 +262,15 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
             }
         };
 
-        let res = NonNull::new(ptr).ok_or(AllocationError::OutOfMemory);
+        let res = NonNull::new(ptr).ok_or("AllocationError::OutOfMemory");
 
-        if !ptr.is_null() {
-            // trace!(
-            //     "SCAllocator({}) allocated ptr=0x{:x}",
-            //     self.size,
-            //     ptr as usize
-            // );
-        }
+        // if !ptr.is_null() {
+        //     trace!(
+        //         "SCAllocator({}) allocated ptr=0x{:x}",
+        //         self.size,
+        //         ptr as usize
+        //     );
+        // }
 
         res
     }
@@ -259,7 +280,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     /// May return an error in case an invalid `layout` is provided.
     /// The function may also move internal slab pages between lists partial -> empty
     /// or full -> partial lists.
-    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), AllocationError> {
+    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
         assert!(layout.size() <= self.size);
         assert!(self.size <= (P::SIZE - CACHE_LINE_SIZE));
         // trace!(

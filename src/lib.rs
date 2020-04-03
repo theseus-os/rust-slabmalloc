@@ -39,6 +39,8 @@
 #![crate_name = "slabmalloc"]
 #![crate_type = "lib"]
 
+extern crate memory;
+
 mod pages;
 mod sc;
 mod zone;
@@ -60,14 +62,15 @@ use core::alloc::Layout;
 use core::fmt;
 use core::mem;
 use core::ptr::{self, NonNull};
+use memory::MappedPages;
 
-// use log::trace;
+use log::{error};
 
 #[cfg(target_arch = "x86_64")]
 const CACHE_LINE_SIZE: usize = 64;
 
-#[cfg(target_arch = "x86_64")]
-const BASE_PAGE_SIZE: usize = 4096;
+// #[cfg(target_arch = "x86_64")]
+// const BASE_PAGE_SIZE: usize = 4096;
 
 #[cfg(target_arch = "x86_64")]
 #[allow(unused)]
