@@ -166,6 +166,7 @@ pub trait AllocablePage {
         Self: core::marker::Sized;
     fn retrieve_mapped_pages(&mut self) -> MappedPages;
     fn clear_metadata(&mut self);
+    fn set_heap_id(&mut self, heap_id: usize);
     fn bitfield(&self) -> &[u64; 8];
     fn bitfield_mut(&mut self) -> &mut [u64; 8];
     fn prev(&mut self) -> &mut Rawlink<Self>
@@ -312,6 +313,10 @@ impl<'a> AllocablePage for ObjectPage8k<'a> {
         self.next = Rawlink::default();
         self.prev = Rawlink::default();
         self.bitfield = [0;8];
+    }
+
+    fn set_heap_id(&mut self, heap_id: usize){
+        self.heap_id = heap_id;
     }
 
     fn bitfield(&self) -> &[u64; 8] {
@@ -463,6 +468,10 @@ impl<'a, T: AllocablePage> PageList<'a, T> {
         }
 
         false
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.elements == 0
     }
 }
 

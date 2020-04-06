@@ -107,6 +107,14 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.empty_slabs.pop()
     }
 
+    fn remove_partial(&mut self) -> Option<&'a mut P> {
+        self.slabs.pop()
+    }
+
+    fn remove_full(&mut self) -> Option<&'a mut P> {
+        self.full_slabs.pop()
+    }
+
     /// Move a page from `slabs` to `empty_slabs`.
     fn move_to_empty(&mut self, page: &'a mut P) {
         let page_ptr = page as *const P;
@@ -178,6 +186,48 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         }
 
         ptr::null_mut()
+    }
+
+    /// removes all of the pages from the lists of `allocator` and adds them to this allocator.
+    pub fn merge(&mut self, allocator: &mut SCAllocator<'a, P>, heap_id: usize) -> Result<(), &'static str> {
+        while !allocator.empty_slabs.is_empty() {
+            match allocator.remove_empty() {
+                Some(new_head) =>{
+                    new_head.set_heap_id(heap_id);
+                    self.empty_slabs.insert_front(new_head)
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        while !allocator.slabs.is_empty() {
+            match allocator.remove_partial() {
+                Some(new_head) =>{
+                    new_head.set_heap_id(heap_id);
+                    self.slabs.insert_front(new_head)
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        while !allocator.full_slabs.is_empty() {
+            match allocator.remove_full() {
+                Some(new_head) =>{
+                    new_head.set_heap_id(heap_id);
+                    self.full_slabs.insert_front(new_head)
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+
     }
 
     /// Creates an allocable page given a MappedPages object and returns a reference to the allocable page.

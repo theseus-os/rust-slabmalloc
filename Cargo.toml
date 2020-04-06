@@ -26,3 +26,4 @@ spin = "0.5.2"
 
 [dependencies.memory]
 path = "../../kernel/memory"
+

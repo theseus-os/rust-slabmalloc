@@ -86,6 +86,7 @@ impl<'a> ZoneAllocator<'a> {
         new_zone!()
     }
 
+
     /// Return maximum size an object of size `current_size` can use.
     ///
     /// Used to optimize `realloc`.
@@ -123,6 +124,20 @@ impl<'a> ZoneAllocator<'a> {
             4097..=ZoneAllocator::MAX_ALLOC_SIZE => Slab::Base(10),
             _ => Slab::Unsupported,
         }
+    }
+
+    /// Removes all the pages of `allocator` and adds them to the appropriate lists in this allocator.
+    pub fn merge(&mut self, allocator: &mut ZoneAllocator<'a>, heap_id: usize) -> Result<(), &'static str> {
+        for size in &ZoneAllocator::BASE_ALLOC_SIZES {
+            match ZoneAllocator::get_slab(*size) {
+                Slab::Base(idx) => {
+                    self.small_slabs[idx].merge(&mut allocator.small_slabs[idx], heap_id)?;
+                }
+                Slab::Large(_idx) => return Err("AllocationError::InvalidLayout"),
+                Slab::Unsupported => return Err("AllocationError::InvalidLayout"),
+            }
+        }
+        Ok(())
     }
 
     /// Refills the SCAllocator for a given Layout with an ObjectPage.
@@ -228,3 +243,4 @@ impl<'a> ZoneAllocator<'a> {
     //     }
     // }
 }
+
