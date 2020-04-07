@@ -188,6 +188,20 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         ptr::null_mut()
     }
 
+    pub fn heap_id(&self) -> Option<usize> {
+        if let Some(head) = &self.empty_slabs.head {
+            return Some(head.heap_id())
+        }
+        if let Some(head) = &self.slabs.head {
+            return Some(head.heap_id())
+        }
+        if let Some(head) = &self.full_slabs.head {
+            return Some(head.heap_id())
+        }
+
+        None
+    }
+
     /// removes all of the pages from the lists of `allocator` and adds them to this allocator.
     pub fn merge(&mut self, allocator: &mut SCAllocator<'a, P>, heap_id: usize) -> Result<(), &'static str> {
         while !allocator.empty_slabs.is_empty() {

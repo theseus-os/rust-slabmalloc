@@ -167,6 +167,7 @@ pub trait AllocablePage {
     fn retrieve_mapped_pages(&mut self) -> MappedPages;
     fn clear_metadata(&mut self);
     fn set_heap_id(&mut self, heap_id: usize);
+    fn heap_id(&self) -> usize;
     fn bitfield(&self) -> &[u64; 8];
     fn bitfield_mut(&mut self) -> &mut [u64; 8];
     fn prev(&mut self) -> &mut Rawlink<Self>
@@ -317,6 +318,10 @@ impl<'a> AllocablePage for ObjectPage8k<'a> {
 
     fn set_heap_id(&mut self, heap_id: usize){
         self.heap_id = heap_id;
+    }
+
+    fn heap_id(&self) -> usize {
+        self.heap_id
     }
 
     fn bitfield(&self) -> &[u64; 8] {

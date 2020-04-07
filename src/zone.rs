@@ -126,6 +126,11 @@ impl<'a> ZoneAllocator<'a> {
         }
     }
 
+    /// Returns the heap id from the first page of the first slab
+    fn heap_id(&self) -> Result<usize, &'static str> {
+        self.small_slabs[0].heap_id().ok_or("There were no pages in the heap")
+    }
+
     /// Removes all the pages of `allocator` and adds them to the appropriate lists in this allocator.
     pub fn merge(&mut self, allocator: &mut ZoneAllocator<'a>, heap_id: usize) -> Result<(), &'static str> {
         for size in &ZoneAllocator::BASE_ALLOC_SIZES {
@@ -181,7 +186,15 @@ impl<'a> ZoneAllocator<'a> {
     /// Allocate a pointer to a block of memory described by `layout`.
     pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, &'static str> {
         match ZoneAllocator::get_slab(layout.size()) {
-            Slab::Base(idx) => self.small_slabs[idx].allocate(layout),
+            Slab::Base(idx) => {
+                match self.small_slabs[idx].allocate(layout) {
+                    Ok(ptr) => Ok(ptr),
+                    Err(_e) => {
+                        self.exchange_pages_within_heap(layout, self.heap_id()?)?;
+                        self.small_slabs[idx].allocate(layout)
+                    }
+                }
+            }
             Slab::Large(_idx) => Err("AllocationError::InvalidLayout"),
             Slab::Unsupported => Err("AllocationError::InvalidLayout"),
         }
