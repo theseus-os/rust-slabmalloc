@@ -74,7 +74,7 @@ impl<'a> ZoneAllocator<'a> {
     pub const BASE_ALLOC_SIZES: [usize; ZoneAllocator::MAX_BASE_SIZE_CLASSES] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, ZoneAllocator::MAX_BASE_ALLOC_SIZE];
 
     /// A slab must have greater than this number of empty pages to return one.
-    const SLAB_EMPTY_PAGES_THRESHOLD: usize = 2;
+    const SLAB_EMPTY_PAGES_THRESHOLD: usize = 0;
 
     #[cfg(feature = "unstable")]
     pub const fn new() -> ZoneAllocator<'a> {
