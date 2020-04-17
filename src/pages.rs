@@ -265,8 +265,8 @@ unsafe impl<'a> Sync for ObjectPage8k<'a> {}
 
 impl<'a> AllocablePage for ObjectPage8k<'a> {
     const SIZE: usize = 8192;
-    const METADATA_SIZE: usize = 88 + core::mem::size_of::<MappedPages>();
-    const HEAP_ID_OFFSET: usize = Self::SIZE - 88;
+    const METADATA_SIZE: usize = core::mem::size_of::<MappedPages>() + core::mem::size_of::<usize>() + (2*core::mem::size_of::<Rawlink<ObjectPage8k<'a>>>()) + (8*8);
+    const HEAP_ID_OFFSET: usize = Self::SIZE - (core::mem::size_of::<usize>() + (2*core::mem::size_of::<Rawlink<ObjectPage8k<'a>>>()) + (8*8));
 
     /// Creates a new 8KiB allocable page and stores the MappedPages object in the metadata portion.
     /// This function checks that the given mapped pages is aligned at a 8KiB boundary, writable and has a size of 8KiB.
