@@ -75,7 +75,7 @@ macro_rules! new_sc_allocator {
 }
 
 impl<'a, P: AllocablePage> SCAllocator<'a, P> {
-    const REBALANCE_COUNT: usize = 10_000;
+    const _REBALANCE_COUNT: usize = 10_000;
 
     /// Create a new SCAllocator.
     #[cfg(feature = "unstable")]
@@ -120,26 +120,26 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.full_slabs.pop()
     }
     
-    /// Since `dealloc` can not reassign pages without requiring a lock
-    /// we check slabs and full slabs periodically as part of `alloc`
-    /// and move them to the empty or partially allocated slab lists.
-    pub(crate) fn check_page_assignments(&mut self) {
-        for slab_page in self.full_slabs.iter_mut() {
-            if !slab_page.is_full() {
-                // We need to move it from self.full_slabs -> self.slabs
-                // trace!("move {:p} full -> partial", slab_page);
-                self.move_full_to_partial(slab_page);
-            }
-        }
+    // /// Since `dealloc` can not reassign pages without requiring a lock
+    // /// we check slabs and full slabs periodically as part of `alloc`
+    // /// and move them to the empty or partially allocated slab lists.
+    // pub(crate) fn check_page_assignments(&mut self) {
+    //     for slab_page in self.full_slabs.iter_mut() {
+    //         if !slab_page.is_full() {
+    //             // We need to move it from self.full_slabs -> self.slabs
+    //             // trace!("move {:p} full -> partial", slab_page);
+    //             self.move_full_to_partial(slab_page);
+    //         }
+    //     }
 
-        for slab_page in self.slabs.iter_mut() {
-            if slab_page.is_empty(self.obj_per_page) {
-                // We need to move it from self.slabs -> self.empty_slabs
-                // trace!("move {:p} partial -> empty", slab_page);
-                self.move_to_empty(slab_page);
-            }
-        }
-    }
+    //     for slab_page in self.slabs.iter_mut() {
+    //         if slab_page.is_empty(self.obj_per_page) {
+    //             // We need to move it from self.slabs -> self.empty_slabs
+    //             // trace!("move {:p} partial -> empty", slab_page);
+    //             self.move_to_empty(slab_page);
+    //         }
+    //     }
+    // }
 
     /// Move a page from `slabs` to `empty_slabs`.
     fn move_to_empty(&mut self, page: &'a mut P) {
