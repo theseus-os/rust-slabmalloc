@@ -90,8 +90,7 @@ impl<'a> ZoneAllocator<'a> {
     /// Return maximum size an object of size `current_size` can use.
     ///
     /// Used to optimize `realloc`.
-    #[allow(dead_code)]
-    fn get_max_size(current_size: usize) -> Option<usize> {
+    pub fn get_max_size(current_size: usize) -> Option<usize> {
         match current_size {
             0..=8 => Some(8),
             9..=16 => Some(16),
@@ -125,9 +124,11 @@ impl<'a> ZoneAllocator<'a> {
             _ => Slab::Unsupported,
         }
     }
+}
 
+impl<'a> ZoneAllocator<'a> {
     /// Returns the heap id from the first page of the first slab
-    fn heap_id(&self) -> Result<usize, &'static str> {
+    pub fn heap_id(&self) -> Result<usize, &'static str> {
         self.small_slabs[0].heap_id().ok_or("There were no pages in the heap")
     }
 
@@ -145,26 +146,7 @@ impl<'a> ZoneAllocator<'a> {
         Ok(())
     }
 
-    /// Refills the SCAllocator for a given Layout with an ObjectPage.
-    ///
-    /// # Safety
-    /// ObjectPage needs to be emtpy etc.
-    pub fn refill(
-        &mut self,
-        layout: Layout,
-        mp: MappedPages,
-        heap_id: usize
-    ) -> Result<(), &'static str> {
-        match ZoneAllocator::get_slab(layout.size()) {
-            Slab::Base(idx) => {
-                self.small_slabs[idx].refill(mp, heap_id)
-            }
-            Slab::Large(_idx) => Err("AllocationError::InvalidLayout"),
-            Slab::Unsupported => Err("AllocationError::InvalidLayout"),
-        }
-    }
-
-    /// Returns an ObjectPage from the SCAllocator with the maximum number of empty pages,
+        /// Returns an ObjectPage from the SCAllocator with the maximum number of empty pages,
     /// if there are more empty pages than the threshold.
     pub fn retrieve_empty_page(
         &mut self
@@ -181,10 +163,35 @@ impl<'a> ZoneAllocator<'a> {
     pub fn exchange_pages_within_heap(&mut self, layout: Layout, heap_id: usize) -> Result<(), &'static str> {
         let mp = self.retrieve_empty_page().ok_or("Couldn't find an empty page to exchange within the heap")?;
         self.refill(layout, mp, heap_id)
-    }   
+    }  
 
+        /// The total number of empty pages in this zone allocator
+    pub fn empty_pages(&self) -> usize {
+        let mut empty_pages = 0;
+        for sca in &self.small_slabs {
+            empty_pages += sca.empty_slabs.elements;
+        }
+        empty_pages
+    }
+
+    /// Number of empty pages and index of small slab with the maximum number of empty pages
+    pub fn small_slab_with_max_empty_pages(&self) -> (usize,usize) {
+        let mut max_empty_pages = 0;
+        let mut id = 0;
+        for i in 0..self.small_slabs.len() {
+            let empty_pages = self.small_slabs[i].empty_slabs.elements;
+            if empty_pages > max_empty_pages {
+                max_empty_pages = empty_pages;
+                id = i;
+            }
+        }
+        (max_empty_pages, id)
+    }
+}
+
+unsafe impl<'a> crate::Allocator<'a> for ZoneAllocator<'a> {
     /// Allocate a pointer to a block of memory described by `layout`.
-    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, &'static str> {
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, &'static str> {
         match ZoneAllocator::get_slab(layout.size()) {
             Slab::Base(idx) => {
                 match self.small_slabs[idx].allocate(layout) {
@@ -206,7 +213,7 @@ impl<'a> ZoneAllocator<'a> {
     /// # Arguments
     ///  * `ptr` - Address of the memory location to free.
     ///  * `layout` - Memory layout of the block pointed to by `ptr`.
-    pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
+    fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
         match ZoneAllocator::get_slab(layout.size()) {
             Slab::Base(idx) => self.small_slabs[idx].deallocate(ptr, layout),
             Slab::Large(_idx) => Err("AllocationError::InvalidLayout"),
@@ -214,27 +221,23 @@ impl<'a> ZoneAllocator<'a> {
         }
     }
 
-    /// The total number of empty pages in this zone allocator
-    pub fn empty_pages(&self) -> usize {
-        let mut empty_pages = 0;
-        for sca in &self.small_slabs {
-            empty_pages += sca.empty_slabs.elements;
-        }
-        empty_pages
-    }
-
-    /// Number of empty pages and index of small slab with the maximum number of empty pages
-    pub fn small_slab_with_max_empty_pages(&self) -> (usize,usize) {
-        let mut max_empty_pages = 0;
-        let mut id = 0;
-        for i in 0..self.small_slabs.len() {
-            let empty_pages = self.small_slabs[i].empty_slabs.elements;
-            if empty_pages > max_empty_pages {
-                max_empty_pages = empty_pages;
-                id = i;
+    /// Refills the SCAllocator for a given Layout with an ObjectPage.
+    ///
+    /// # Safety
+    /// ObjectPage needs to be emtpy etc.
+    fn refill(
+        &mut self,
+        layout: Layout,
+        mp: MappedPages,
+        heap_id: usize
+    ) -> Result<(), &'static str> {
+        match ZoneAllocator::get_slab(layout.size()) {
+            Slab::Base(idx) => {
+                self.small_slabs[idx].refill(mp, heap_id)
             }
+            Slab::Large(_idx) => Err("AllocationError::InvalidLayout"),
+            Slab::Unsupported => Err("AllocationError::InvalidLayout"),
         }
-        (max_empty_pages, id)
     }
 
 

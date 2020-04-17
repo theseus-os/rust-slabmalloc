@@ -47,6 +47,8 @@ fn cmin(a: usize, b: usize) -> usize {
 pub struct SCAllocator<'a, P: AllocablePage> {
     /// Maximum possible allocation size for this `SCAllocator`.
     pub(crate) size: usize,
+    /// Keeps track of succeeded allocations.
+    pub(crate) allocation_count: usize,
     /// max objects per page
     pub(crate) obj_per_page: usize,
     /// List of empty ObjectPages (nothing allocated in these).
@@ -63,6 +65,7 @@ macro_rules! new_sc_allocator {
     ($size:expr) => {
         SCAllocator {
             size: $size,
+            allocation_count: 0,
             obj_per_page: cmin((P::SIZE - P::METADATA_SIZE) / $size, 8 * 64),
             empty_slabs: PageList::new(),
             slabs: PageList::new(),
@@ -72,6 +75,8 @@ macro_rules! new_sc_allocator {
 }
 
 impl<'a, P: AllocablePage> SCAllocator<'a, P> {
+    const REBALANCE_COUNT: usize = 10_000;
+
     /// Create a new SCAllocator.
     #[cfg(feature = "unstable")]
     pub const fn new(size: usize) -> SCAllocator<'a, P> {
@@ -113,6 +118,27 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
 
     fn remove_full(&mut self) -> Option<&'a mut P> {
         self.full_slabs.pop()
+    }
+    
+    /// Since `dealloc` can not reassign pages without requiring a lock
+    /// we check slabs and full slabs periodically as part of `alloc`
+    /// and move them to the empty or partially allocated slab lists.
+    pub(crate) fn check_page_assignments(&mut self) {
+        for slab_page in self.full_slabs.iter_mut() {
+            if !slab_page.is_full() {
+                // We need to move it from self.full_slabs -> self.slabs
+                // trace!("move {:p} full -> partial", slab_page);
+                self.move_full_to_partial(slab_page);
+            }
+        }
+
+        for slab_page in self.slabs.iter_mut() {
+            if slab_page.is_empty(self.obj_per_page) {
+                // We need to move it from self.slabs -> self.empty_slabs
+                // trace!("move {:p} partial -> empty", slab_page);
+                self.move_to_empty(slab_page);
+            }
+        }
     }
 
     /// Move a page from `slabs` to `empty_slabs`.
@@ -172,6 +198,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         // TODO: Do we really need to check multiple slab pages (due to alignment)
         // If not we can get away with a singly-linked list and have 8 more bytes
         // for the bitfield in an ObjectPage.
+
         for slab_page in self.slabs.iter_mut() {
             let ptr = slab_page.allocate(sc_layout);
             if !ptr.is_null() {
@@ -179,11 +206,17 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
                     // trace!("move {:p} partial -> full", slab_page);
                     self.move_partial_to_full(slab_page);
                 }
+                self.allocation_count += 1;
                 return ptr;
             } else {
                 continue;
             }
         }
+
+        // // Periodically rebalance page-lists (since dealloc can't do it for us)
+        // if self.allocation_count % SCAllocator::<P>::REBALANCE_COUNT == 0 {
+        //     self.check_page_assignments();
+        // }
 
         ptr::null_mut()
     }
