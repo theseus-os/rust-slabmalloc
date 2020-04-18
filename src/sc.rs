@@ -307,7 +307,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     pub fn retrieve_empty_page(&mut self) -> Option<MappedPages> {
         match self.remove_empty(){
             Some(page) => {
-                Some(page.retrieve_mapped_pages())
+                Some(page.retrieve_mapped_pages()) //safe because the page has been removed from the heap's linked lists
             }
             None => {
                 None

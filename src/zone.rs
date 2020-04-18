@@ -9,8 +9,9 @@ use crate::*;
 ///
 /// We can get rid of this once the const fn feature is fully stabilized.
 macro_rules! new_zone {
-    () => {
+    ($x:expr) => {
         ZoneAllocator {
+            heap_id: $x,
             // TODO(perf): We should probably pick better classes
             // rather than powers-of-two (see SuperMalloc etc.)
             small_slabs: [
@@ -39,13 +40,14 @@ macro_rules! new_zone {
 /// The allocator provides to refill functions `refill` and `refill_large`
 /// to provide the underlying `SCAllocator` with more memory in case it runs out.
 pub struct ZoneAllocator<'a> {
+    pub heap_id: usize,
     small_slabs: [SCAllocator<'a, ObjectPage8k<'a>>; ZoneAllocator::MAX_BASE_SIZE_CLASSES],
     // big_slabs: [SCAllocator<'a, LargeObjectPage<'a>>; ZoneAllocator::MAX_LARGE_SIZE_CLASSES],
 }
 
 impl<'a> Default for ZoneAllocator<'a> {
     fn default() -> ZoneAllocator<'a> {
-        new_zone!()
+        new_zone!(0)
     }
 }
 
@@ -77,13 +79,13 @@ impl<'a> ZoneAllocator<'a> {
     const SLAB_EMPTY_PAGES_THRESHOLD: usize = 0;
 
     #[cfg(feature = "unstable")]
-    pub const fn new() -> ZoneAllocator<'a> {
-        new_zone!()
+    pub const fn new(heap_id: usize) -> ZoneAllocator<'a> {
+        new_zone!(heap_id)
     }
 
     #[cfg(not(feature = "unstable"))]
-    pub fn new() -> ZoneAllocator<'a> {
-        new_zone!()
+    pub fn new(heap_id: usize) -> ZoneAllocator<'a> {
+        new_zone!(heap_id)
     }
 
 
@@ -127,17 +129,13 @@ impl<'a> ZoneAllocator<'a> {
 }
 
 impl<'a> ZoneAllocator<'a> {
-    /// Returns the heap id from the first page of the first slab
-    pub fn heap_id(&self) -> Result<usize, &'static str> {
-        self.small_slabs[0].heap_id().ok_or("There were no pages in the heap")
-    }
 
     /// Removes all the pages of `allocator` and adds them to the appropriate lists in this allocator.
-    pub fn merge(&mut self, allocator: &mut ZoneAllocator<'a>, heap_id: usize) -> Result<(), &'static str> {
+    pub fn merge(&mut self, allocator: &mut ZoneAllocator<'a>) -> Result<(), &'static str> {
         for size in &ZoneAllocator::BASE_ALLOC_SIZES {
             match ZoneAllocator::get_slab(*size) {
                 Slab::Base(idx) => {
-                    self.small_slabs[idx].merge(&mut allocator.small_slabs[idx], heap_id)?;
+                    self.small_slabs[idx].merge(&mut allocator.small_slabs[idx], self.heap_id)?;
                 }
                 Slab::Large(_idx) => return Err("AllocationError::InvalidLayout"),
                 Slab::Unsupported => return Err("AllocationError::InvalidLayout"),
@@ -151,41 +149,27 @@ impl<'a> ZoneAllocator<'a> {
     pub fn retrieve_empty_page(
         &mut self
     ) -> Option<MappedPages> {
-        let (max_empty_pages, idx) = self.small_slab_with_max_empty_pages();
-        if max_empty_pages > ZoneAllocator::SLAB_EMPTY_PAGES_THRESHOLD {
-            self.small_slabs[idx].retrieve_empty_page()
+        for slab in self.small_slabs.iter_mut() {
+            let empty_pages = slab.empty_slabs.elements;
+            if empty_pages > ZoneAllocator::SLAB_EMPTY_PAGES_THRESHOLD {
+                return slab.retrieve_empty_page()
+            }
         }
-        else {
-            None
-        }
+        None
     }
 
-    pub fn exchange_pages_within_heap(&mut self, layout: Layout, heap_id: usize) -> Result<(), &'static str> {
+    pub fn exchange_pages_within_heap(&mut self, layout: Layout) -> Result<(), &'static str> {
         let mp = self.retrieve_empty_page().ok_or("Couldn't find an empty page to exchange within the heap")?;
-        self.refill(layout, mp, heap_id)
+        self.refill(layout, mp)
     }  
 
-        /// The total number of empty pages in this zone allocator
+    /// The total number of empty pages in this zone allocator
     pub fn empty_pages(&self) -> usize {
         let mut empty_pages = 0;
         for sca in &self.small_slabs {
             empty_pages += sca.empty_slabs.elements;
         }
         empty_pages
-    }
-
-    /// Number of empty pages and index of small slab with the maximum number of empty pages
-    pub fn small_slab_with_max_empty_pages(&self) -> (usize,usize) {
-        let mut max_empty_pages = 0;
-        let mut id = 0;
-        for i in 0..self.small_slabs.len() {
-            let empty_pages = self.small_slabs[i].empty_slabs.elements;
-            if empty_pages > max_empty_pages {
-                max_empty_pages = empty_pages;
-                id = i;
-            }
-        }
-        (max_empty_pages, id)
     }
 }
 
@@ -197,7 +181,7 @@ unsafe impl<'a> crate::Allocator<'a> for ZoneAllocator<'a> {
                 match self.small_slabs[idx].allocate(layout) {
                     Ok(ptr) => Ok(ptr),
                     Err(_e) => {
-                        self.exchange_pages_within_heap(layout, self.heap_id()?)?;
+                        self.exchange_pages_within_heap(layout)?;
                         self.small_slabs[idx].allocate(layout)
                     }
                 }
@@ -229,11 +213,10 @@ unsafe impl<'a> crate::Allocator<'a> for ZoneAllocator<'a> {
         &mut self,
         layout: Layout,
         mp: MappedPages,
-        heap_id: usize
     ) -> Result<(), &'static str> {
         match ZoneAllocator::get_slab(layout.size()) {
             Slab::Base(idx) => {
-                self.small_slabs[idx].refill(mp, heap_id)
+                self.small_slabs[idx].refill(mp, self.heap_id)
             }
             Slab::Large(_idx) => Err("AllocationError::InvalidLayout"),
             Slab::Unsupported => Err("AllocationError::InvalidLayout"),

@@ -101,6 +101,5 @@ pub unsafe trait Allocator<'a> {
         &mut self,
         layout: Layout,
         mp: MappedPages,
-        heap_id: usize
     ) -> Result<(), &'static str>;
 }

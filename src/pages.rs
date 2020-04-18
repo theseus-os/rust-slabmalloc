@@ -309,6 +309,8 @@ impl<'a> AllocablePage for ObjectPage8k<'a> {
 
     /// Returns the MappedPages object that was stored in the metadata portion of the page,
     /// by swapping with an empty MappedPages object.
+    /// 
+    /// Marked unsafe since it should only be used when the the AllocablePage it applies to is removed from the heap's linked list and isn't used again
     fn retrieve_mapped_pages(&mut self) -> MappedPages {
         let mut mp = MappedPages::empty();
         core::mem::swap(&mut self.mp, &mut mp);
