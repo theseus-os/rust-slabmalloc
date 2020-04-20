@@ -144,22 +144,28 @@ impl<'a> ZoneAllocator<'a> {
         Ok(())
     }
 
-        /// Returns an ObjectPage from the SCAllocator with the maximum number of empty pages,
+    /// Returns an ObjectPage from the SCAllocator with the maximum number of empty pages,
     /// if there are more empty pages than the threshold.
     pub fn retrieve_empty_page(
-        &mut self
+        &mut self,
+        heap_empty_page_threshold: usize
     ) -> Option<MappedPages> {
-        for slab in self.small_slabs.iter_mut() {
-            let empty_pages = slab.empty_slabs.elements;
-            if empty_pages > ZoneAllocator::SLAB_EMPTY_PAGES_THRESHOLD {
-                return slab.retrieve_empty_page()
+        if self.empty_pages() <= heap_empty_page_threshold {
+            return None;
+        }
+        else {
+            for slab in self.small_slabs.iter_mut() {
+                let empty_pages = slab.empty_slabs.elements;
+                if empty_pages > ZoneAllocator::SLAB_EMPTY_PAGES_THRESHOLD {
+                    return slab.retrieve_empty_page()
+                }
             }
         }
         None
     }
 
     pub fn exchange_pages_within_heap(&mut self, layout: Layout) -> Result<(), &'static str> {
-        let mp = self.retrieve_empty_page().ok_or("Couldn't find an empty page to exchange within the heap")?;
+        let mp = self.retrieve_empty_page(0).ok_or("Couldn't find an empty page to exchange within the heap")?;
         self.refill(layout, mp)
     }  
 
