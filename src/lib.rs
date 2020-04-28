@@ -62,9 +62,9 @@ use core::alloc::Layout;
 use core::fmt;
 use core::mem;
 use core::ptr::{self, NonNull};
-use memory::MappedPages;
+use memory::{VirtualAddress, MappedPages, create_mapping, EntryFlags};
 
-use log::{error};
+use log::{error,trace};
 
 #[cfg(target_arch = "x86_64")]
 const CACHE_LINE_SIZE: usize = 64;
@@ -92,14 +92,10 @@ pub enum AllocationError {
 pub unsafe trait Allocator<'a> {
     fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, &'static str>;
     fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str>;
-    // unsafe fn refill_large(
-    //     &mut self,
-    //     layout: Layout,
-    //     new_page: &'a mut LargeObjectPage<'a>,
-    // ) -> Result<(), AllocationError>;
     fn refill(
         &mut self,
         layout: Layout,
-        mp: MappedPages,
+        mp: MappedPages8k,
     ) -> Result<(), &'static str>;
 }
+
