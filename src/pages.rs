@@ -155,7 +155,7 @@ impl Bitfield for [AtomicU64] {
 /// Holds allocated data within 2 4-KiB pages.
 ///
 /// Has a data-section where objects are allocated from
-/// and a small amount of meta-data in form of a bitmap
+/// and a small amount of meta-data in the form of a bitmap
 /// to track allocations at the end of the page.
 ///
 /// # Notes
@@ -168,63 +168,56 @@ pub struct ObjectPage8k {
     #[allow(dead_code)]
     data: [u8; ObjectPage8k::SIZE -ObjectPage8k::METADATA_SIZE],
 
-    pub heap_id: usize,
+    heap_id: usize,
 
     /// Next element in list (used by `PageList`).
     next_mp: Option<MappedPages8k>,
 
     /// A bit-field to track free/allocated memory within `data`.
-    pub(crate) bitfield: [AtomicU64; 8],
+    bitfield: [AtomicU64; 8],
 }
 
 
-// These needs some more work to be really safe...
-unsafe impl Send for ObjectPage8k {}
-unsafe impl Sync for ObjectPage8k {}
-
 impl ObjectPage8k {
-    pub const SIZE: usize = 8192;
-    pub const METADATA_SIZE: usize = core::mem::size_of::<Option<MappedPages>>() + core::mem::size_of::<usize>()  + (8*8);
-    pub const HEAP_ID_OFFSET: usize = Self::SIZE - (core::mem::size_of::<Option<MappedPages>>() + core::mem::size_of::<usize>() + (8*8));
+    const SIZE: usize = 8192;
+    const METADATA_SIZE: usize = core::mem::size_of::<Option<MappedPages8k>>() + core::mem::size_of::<usize>()  + (8*8);
+    const HEAP_ID_OFFSET: usize = Self::SIZE - (core::mem::size_of::<Option<MappedPages8k>>() + core::mem::size_of::<usize>() + (8*8));
 
     /// clears the metadata section of the page
-    pub fn clear_metadata(&mut self) {
+    fn clear_metadata(&mut self) {
         self.heap_id = 0;
+
+        // If we simply set self.next_mp to None then this causes an error message to be printed 
+        // out in MappedPages::drop() due to a difference in page tables because next_mp has never been initialized.
+        // This should not lead to any actual MappedPages being forgotten since it is only called when creating
+        // a new MappedPages8k object. 
         let mut mp = None;
         core::mem::swap(&mut mp, &mut self.next_mp);
         core::mem::forget(mp);
-        // self.next_mp = None; // If we start with an uninitialized ObjectPage8k, then this will cause an error message in MappedPages::drop() due to difference in page tables
+
         for bf in &self.bitfield {
             bf.store(0, Ordering::SeqCst);
         }
     }
 
-    pub fn set_heap_id(&mut self, heap_id: usize){
+    pub(crate) fn set_heap_id(&mut self, heap_id: usize){
         self.heap_id = heap_id;
     }
 
-    pub fn heap_id(&self) -> usize {
-        self.heap_id
-    }
-
-    pub fn bitfield(&self) -> &[AtomicU64; 8] {
+    pub(crate) fn bitfield(&self) -> &[AtomicU64; 8] {
         &self.bitfield
     }
     
-    pub fn bitfield_mut(&mut self) -> &mut [AtomicU64; 8] {
+    pub(crate) fn bitfield_mut(&mut self) -> &mut [AtomicU64; 8] {
         &mut self.bitfield
     }
 
-    pub fn next(&mut self) -> &mut Option<MappedPages8k> {
+    pub(crate) fn next(&mut self) -> &mut Option<MappedPages8k> {
         &mut self.next_mp
     }
 
-    pub fn buffer_size() -> usize {
-        ObjectPage8k::SIZE - ObjectPage8k::METADATA_SIZE
-    }
-
     /// Tries to find a free block within `data` that satisfies `alignment` requirement.
-    pub fn first_fit(&self, layout: Layout) -> Option<(usize, usize)> {
+    pub(crate) fn first_fit(&self, layout: Layout) -> Option<(usize, usize)> {
         let base_addr = (&*self as *const Self as *const u8) as usize;
         self.bitfield().first_fit(base_addr, layout, Self::SIZE, Self::METADATA_SIZE)
     }
@@ -232,7 +225,7 @@ impl ObjectPage8k {
     /// Tries to allocate an object within this page.
     ///
     /// In case the slab is full, returns a null ptr.
-    pub fn allocate(&mut self, layout: Layout) -> *mut u8 {
+    pub(crate) fn allocate(&mut self, layout: Layout) -> *mut u8 {
         match self.first_fit(layout) {
             Some((idx, addr)) => {
                 self.bitfield().set_bit(idx);
@@ -243,17 +236,17 @@ impl ObjectPage8k {
     }
 
     /// Checks if we can still allocate more objects of a given layout within the page.
-    pub fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.bitfield().is_full()
     }
 
     /// Checks if the page has currently no allocations.
-    pub fn is_empty(&self, relevant_bits: usize) -> bool {
+    pub(crate) fn is_empty(&self, relevant_bits: usize) -> bool {
         self.bitfield().all_free(relevant_bits)
     }
 
     /// Deallocates a memory object within this page.
-    pub fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
+    pub(crate) fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
         // trace!(
         //     "AllocablePage deallocating ptr = {:p} with {:?}",
         //     ptr,
@@ -273,33 +266,36 @@ impl ObjectPage8k {
     }
 }
 
-
+/// A wrapper type around MappedPages which ensures that the MappedPages
+/// have a size and alignment of 8 KiB and are writable.
 pub struct MappedPages8k(MappedPages);
 
 impl MappedPages8k {
     pub const SIZE: usize = ObjectPage8k::SIZE;
+    pub const BUFFER_SIZE: usize = ObjectPage8k::SIZE - ObjectPage8k::METADATA_SIZE;
     pub const METADATA_SIZE: usize = ObjectPage8k::METADATA_SIZE;
     pub const HEAP_ID_OFFSET: usize = ObjectPage8k::HEAP_ID_OFFSET;
     
+    /// Creates a MappedPages8k object from MappedPages that have a size and alignment of 8 KiB and are writable.
     pub fn new(mp: MappedPages) -> Result<MappedPages8k, &'static str> {
         let vaddr = mp.start_address().value();
         
         // check that the mapped pages are aligned to 8k
         if vaddr % Self::SIZE != 0 {
-            error!("The mapped pages for the heap are not aligned at 8k bytes");
-            return Err("The mapped pages for the heap are not aligned at 8k bytes");
+            error!("Trying to create a MappedPages8k but MappedPages were not aligned at 8k bytes");
+            return Err("Trying to create a MappedPages8k but MappedPages were not aligned at 8k bytes");
         }
 
         // check that the mapped pages is writable
         if !mp.flags().is_writable() {
-            error!("Tried to convert to an allocable page but MappedPages weren't writable (flags: {:?})",  mp.flags());
-            return Err("Trying to create an allocable page but MappedPages were not writable");
+            error!("Trying to create a MappedPages8k but MappedPages were not writable (flags: {:?})",  mp.flags());
+            return Err("Trying to create a MappedPages8k but MappedPages were not writable");
         }
         
         // check that the mapped pages size is equal in size to the page
         if Self::SIZE != mp.size_in_bytes() {
-            error!("MappedPages of size {} cannot be converted to an allocable page", mp.size_in_bytes());
-            return Err("MappedPages size does not equal allocable page size");
+            error!("Trying to create a MappedPages8k but MappedPages were not 8 KiB (size: {} bytes)", mp.size_in_bytes());
+            return Err("Trying to create a MappedPages8k but MappedPages were not 8 KiB");
         }
 
         let mut mp_8k = MappedPages8k(mp);
@@ -307,14 +303,16 @@ impl MappedPages8k {
         Ok(mp_8k)
     }
 
-    fn as_ObjectPage8k(&self) -> &ObjectPage8k {
+    /// Return the pages represented by the MappedPages8k as an ObjectPage8k reference
+    fn as_objectpage8k(&self) -> &ObjectPage8k {
         // SAFE: we guarantee the size and lifetime are within that of this MappedPages object
         unsafe {
             mem::transmute(self.0.start_address())
         }
     }
 
-    fn as_ObjectPage8k_mut(&mut self) -> &mut ObjectPage8k {
+    /// Return the pages represented by the MappedPages8k as a mutable ObjectPage8k reference
+    fn as_objectpage8k_mut(&mut self) -> &mut ObjectPage8k {
         // SAFE: we guarantee the size and lifetime are within that of this MappedPages object
         unsafe {
             mem::transmute(self.0.start_address())
@@ -326,27 +324,27 @@ impl MappedPages8k {
     }
 }
 
-impl<'a> Deref for MappedPages8k {
+/// Deref of MappedPages8k will return a reference to the pages it represents
+/// cast as an ObjectPage8k
+impl Deref for MappedPages8k {
     type Target = ObjectPage8k;
     fn deref(&self) -> &ObjectPage8k {
-        self.as_ObjectPage8k()
+        self.as_objectpage8k()
     }
 }
-impl<'a> DerefMut for MappedPages8k {
+
+/// DerefMut of MappedPages8k will return a mutable reference to the pages it represents
+/// cast as an ObjectPage8k
+impl DerefMut for MappedPages8k {
     fn deref_mut(&mut self) -> &mut ObjectPage8k {
-        self.as_ObjectPage8k_mut()
+        self.as_objectpage8k_mut()
     }
 }
 
-// These needs some more work to be really safe...
-unsafe impl Send for MappedPages8k {}
-unsafe impl Sync for MappedPages8k {}
 
-
-
-/// A list of MappedPages8k which represent 8KiB of memory.
-/// Rather than using pointers to create a linked list, we store each successive MappedPages8k object within the 
-/// memory of the previous MappedPages8k.
+/// A recursive data structure representing a list of MappedPages8k.
+/// Rather than using pointers to create a linked list, we store each successive 
+/// MappedPages8k object within the pages represented by the previous MappedPages8k.
 pub(crate) struct PageList {
     /// The head of the list.
     pub(crate) head: Option<MappedPages8k>,
@@ -398,7 +396,7 @@ impl PageList {
         self.elements += 1;
     }
 
-    /// Removes the MappedPages8k from the list which has the starting address `page_start_addr`.
+    /// Removes from the list and returns the MappedPages8k with starting address `page_start_addr`.
     pub(crate) fn remove_from_list(&mut self, page_start_addr: VirtualAddress) -> Option<MappedPages8k> {
         let mut head = &mut self.head;
         match head {
@@ -438,7 +436,7 @@ impl PageList {
         }
     }
 
-    /// Removes the MappedPages8k from the front of the list.
+    /// Removes and returns the element at the front of the list.
     pub(crate) fn pop(&mut self) -> Option<MappedPages8k> {
         match self.head {
             None => None,
@@ -447,7 +445,6 @@ impl PageList {
                 let old_head = self.head.take();
                 self.head = head_next; 
                 self.elements -= 1;
-
                 old_head
             }
         }
@@ -470,24 +467,32 @@ impl PageList {
 
     /// Print the starting address of all the elements in the list
     pub(crate) fn print(&mut self) {
-        trace!("list");
+        trace!("*** page list ***");
         let page_iter = self.iter_mut();
         for page in page_iter {
             trace!("{:#X}", page.start_address())
         }
-        trace!(" ");
     }
 }
 
-/// Simple test to check the working of PageList.
+impl Drop for PageList {
+    /// Iterate through all the elements in the list and drop them
+    fn drop(&mut self) {
+        while !self.is_empty() {
+            self.pop();
+        }
+    }
+}
+
+/// Simple test to check the correctness of PageList implementation.
 /// Remove alignment requirement from MappedPages8k before running
 pub fn test_page_list() -> Result<(), &'static str>{
     let mut list = PageList::new();
     let mut addr: [VirtualAddress; 10] = [VirtualAddress::new_canonical(0); 10];
 
     for i in 0..10 {
-        let mut mp = create_mapping(8192, EntryFlags::WRITABLE)?;
-        let mut mp_8k = MappedPages8k::new(mp)?;
+        let mp = create_mapping(8192, EntryFlags::WRITABLE)?;
+        let mp_8k = MappedPages8k::new(mp)?;
         addr[i] = mp_8k.start_address();
 
         list.insert_front(mp_8k);
@@ -535,9 +540,8 @@ impl<'a> Iterator for MappedPages8kIterMut<'a> {
 
 /// Rawlink is a type like Option<T> but for holding a raw pointer.
 ///
-/// We use it to link AllocablePages together. You probably won't need
-/// to use this type if you're not implementing AllocablePage
-/// for a custom page-size.
+/// We use it to link Pages together. You probably won't need
+/// to use this type if you're not implementing a custom page-size.
 pub struct Rawlink<T> {
     p: *mut T,
 }
