@@ -129,7 +129,7 @@ impl SCAllocator {
     // }
 
     /// Move a page with the starting address `page_addr` from `slabs` to `empty_slabs`.
-    fn move_to_empty(&mut self, page_addr: VirtualAddress) {
+    fn move_to_empty(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{
         debug_assert!(self.slabs.contains(page_addr));
         debug_assert!(
             !self.empty_slabs.contains(page_addr),
@@ -137,35 +137,39 @@ impl SCAllocator {
             page_addr
         );
 
-        let page_to_move = self.slabs.remove_from_list(page_addr).unwrap(); //we can unwrap here since we have already checked that the page is present
+        let page_to_move = self.slabs.remove_from_list(page_addr).ok_or("move to empty:: page was not in partial list")?;
         self.empty_slabs.insert_front(page_to_move);
 
         debug_assert!(!self.slabs.contains(page_addr));
         debug_assert!(self.empty_slabs.contains(page_addr));
+
+        Ok(())
     }
 
     /// Move a page with the starting address `page_addr` from `slab` to `full_slabs`.
-    fn move_partial_to_full(&mut self, page_addr: VirtualAddress) { 
+    fn move_partial_to_full(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{ 
         debug_assert!(self.slabs.contains(page_addr));
         debug_assert!(!self.full_slabs.contains(page_addr));
 
-        let page_to_move = self.slabs.remove_from_list(page_addr).unwrap();//we can unwrap here since we have already checked that the page is present
+        let page_to_move = self.slabs.remove_from_list(page_addr).ok_or("move partial to full:: page was not in partial list")?;
         self.full_slabs.insert_front(page_to_move);
 
         debug_assert!(!self.slabs.contains(page_addr));
         debug_assert!(self.full_slabs.contains(page_addr));
+        Ok(())
     }
 
     /// Move a page with the starting address `page_addr` from `full_slabs` to `slab`.
-    fn move_full_to_partial(&mut self, page_addr: VirtualAddress) {
+    fn move_full_to_partial(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{
         debug_assert!(!self.slabs.contains(page_addr));
         debug_assert!(self.full_slabs.contains(page_addr));
 
-        let page_to_move = self.full_slabs.remove_from_list(page_addr).unwrap();//we can unwrap here since we have already checked that the page is present
+        let page_to_move = self.full_slabs.remove_from_list(page_addr).ok_or("move full to partial:: page was not in full list")?;
         self.slabs.insert_front(page_to_move);
 
         debug_assert!(self.slabs.contains(page_addr));
         debug_assert!(!self.full_slabs.contains(page_addr));
+        Ok(())
     }
 
     /// Tries to allocate a block of memory with respect to the `layout`.
@@ -175,7 +179,7 @@ impl SCAllocator {
     /// # Arguments
     ///  * `sc_layout`: This is not the original layout but adjusted for the
     ///     SCAllocator size (>= original).
-    fn try_allocate_from_pagelist(&mut self, sc_layout: Layout) -> *mut u8 {
+    fn try_allocate_from_pagelist(&mut self, sc_layout: Layout) -> Result<*mut u8, &'static str> {
         // TODO: Do we really need to check multiple slab pages (due to alignment)
         // If not we can get away with a singly-linked list and have 8 more bytes
         // for the bitfield in an ObjectPage.
@@ -185,10 +189,10 @@ impl SCAllocator {
             if !ptr.is_null() {
                 if slab_page.is_full() {
                     // trace!("move {:p} partial -> full", slab_page);
-                    self.move_partial_to_full(slab_page.start_address());
+                    self.move_partial_to_full(slab_page.start_address())?;
                 }
                 self.allocation_count += 1;
-                return ptr;
+                return Ok(ptr);
             } else {
                 continue;
             }
@@ -199,7 +203,7 @@ impl SCAllocator {
         //     self.check_page_assignments();
         // }
 
-        ptr::null_mut()
+        Ok(ptr::null_mut())
     }
 
 
@@ -242,7 +246,7 @@ impl SCAllocator {
         let ptr = {
             // Try to allocate from partial slabs,
             // if we fail check if we have empty pages and allocate from there
-            let ptr = self.try_allocate_from_pagelist(new_layout);
+            let ptr = self.try_allocate_from_pagelist(new_layout)?;
             if ptr.is_null() && self.empty_slabs.head.is_some() {
                 // Re-try allocation in empty page
                 let mut empty_page = self.empty_slabs.pop().expect("We checked head.is_some()");
@@ -313,11 +317,11 @@ impl SCAllocator {
         if slab_page.is_empty(self.obj_per_page) {
             // We need to move it from self.slabs -> self.empty_slabs
             // trace!("move {:p} {:#X} partial -> empty", slab_page, VirtualAddress::new(page)?);
-            self.move_to_empty(slab_page.start_address());
+            self.move_to_empty(slab_page.start_address())?;
         } else if slab_page_was_full {
             // We need to move it from self.full_slabs -> self.slabs
             // trace!("move {:p} full -> partial", slab_page);
-            self.move_full_to_partial(slab_page.start_address());
+            self.move_full_to_partial(slab_page.start_address())?;
         }
 
         ret
