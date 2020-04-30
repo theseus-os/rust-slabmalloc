@@ -25,8 +25,7 @@ fn cmin(a: usize, b: usize) -> usize {
 
 /// A slab allocator allocates elements of a fixed size.
 ///
-/// It maintains three internal lists of objects that implement `AllocablePage`
-/// from which it can allocate memory.
+/// It maintains three internal lists of MappedPages8k
 ///
 ///  * `empty_slabs`: Is a list of pages that the SCAllocator maintains, but
 ///    has 0 allocations in them, these can be given back to a requestor in case
@@ -44,19 +43,19 @@ fn cmin(a: usize, b: usize) -> usize {
 ///
 /// If an allocation returns `OutOfMemory` a client using SCAllocator can refill
 /// it using the `refill` function.
-pub struct SCAllocator<'a, P: AllocablePage> {
+pub struct SCAllocator {
     /// Maximum possible allocation size for this `SCAllocator`.
     pub(crate) size: usize,
     /// Keeps track of succeeded allocations.
     pub(crate) allocation_count: usize,
     /// max objects per page
     pub(crate) obj_per_page: usize,
-    /// List of empty ObjectPages (nothing allocated in these).
-    pub(crate) empty_slabs: PageList<'a, P>,
-    /// List of partially used ObjectPage (some objects allocated but pages are not full).
-    pub(crate) slabs: PageList<'a, P>,
-    /// List of full ObjectPages (everything allocated in these don't need to search them).
-    pub(crate) full_slabs: PageList<'a, P>,
+    /// List of empty Pages (nothing allocated in these).
+    pub(crate) empty_slabs: PageList,
+    /// List of partially used Pages (some objects allocated but pages are not full).
+    pub(crate) slabs: PageList,
+    /// List of full Pages (everything allocated in these don't need to search them).
+    pub(crate) full_slabs: PageList,
 }
 
 /// Creates an instance of a scallocator, we do this in a macro because we
@@ -66,7 +65,7 @@ macro_rules! new_sc_allocator {
         SCAllocator {
             size: $size,
             allocation_count: 0,
-            obj_per_page: cmin((P::SIZE - P::METADATA_SIZE) / $size, 8 * 64),
+            obj_per_page: cmin((MappedPages8k::SIZE - MappedPages8k::METADATA_SIZE) / $size, 8 * 64),
             empty_slabs: PageList::new(),
             slabs: PageList::new(),
             full_slabs: PageList::new(),
@@ -74,17 +73,17 @@ macro_rules! new_sc_allocator {
     };
 }
 
-impl<'a, P: AllocablePage> SCAllocator<'a, P> {
+impl SCAllocator {
     const _REBALANCE_COUNT: usize = 10_000;
 
     /// Create a new SCAllocator.
     #[cfg(feature = "unstable")]
-    pub const fn new(size: usize) -> SCAllocator<'a, P> {
+    pub const fn new(size: usize) -> SCAllocator {
         new_sc_allocator!(size)
     }
 
     #[cfg(not(feature = "unstable"))]
-    pub fn new(size: usize) -> SCAllocator<'a, P> {
+    pub fn new(size: usize) -> SCAllocator {
         new_sc_allocator!(size)
     }
 
@@ -93,31 +92,19 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         self.size
     }
 
-    /// Add a new ObjectPage.
-    fn insert_partial_slab(&mut self, new_head: &'a mut P) {
+    /// Add a new page to the partial list.
+    fn insert_partial_slab(&mut self, new_head: MappedPages8k) {
         self.slabs.insert_front(new_head);
     }
 
     /// Add page to empty list.
-    fn insert_empty(&mut self, new_head: &'a mut P) {
-        assert_eq!(
-            new_head as *const P as usize % P::SIZE,
-            0,
-            "Inserted page is not aligned to page-size."
-        );
+    fn insert_empty(&mut self, new_head: MappedPages8k) {
         self.empty_slabs.insert_front(new_head);
     }
 
-    fn remove_empty(&mut self) -> Option<&'a mut P> {
+    /// Remove a page from the empty list
+    fn remove_empty(&mut self) -> Option<MappedPages8k> {
         self.empty_slabs.pop()
-    }
-
-    fn remove_partial(&mut self) -> Option<&'a mut P> {
-        self.slabs.pop()
-    }
-
-    fn remove_full(&mut self) -> Option<&'a mut P> {
-        self.full_slabs.pop()
     }
     
     // /// Since `dealloc` can not reassign pages without requiring a lock
@@ -141,50 +128,48 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     //     }
     // }
 
-    /// Move a page from `slabs` to `empty_slabs`.
-    fn move_to_empty(&mut self, page: &'a mut P) {
-        let page_ptr = page as *const P;
-
-        debug_assert!(self.slabs.contains(page_ptr));
+    /// Move a page with the starting address `page_addr` from `slabs` to `empty_slabs`.
+    fn move_to_empty(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{
+        debug_assert!(self.slabs.contains(page_addr));
         debug_assert!(
-            !self.empty_slabs.contains(page_ptr),
-            "Page {:p} already in emtpy_slabs",
-            page_ptr
+            !self.empty_slabs.contains(page_addr),
+            "Page {:p} already in empty_slabs",
+            page_addr
         );
 
-        self.slabs.remove_from_list(page);
-        self.empty_slabs.insert_front(page);
+        let page_to_move = self.slabs.remove_from_list(page_addr).ok_or("move to empty:: page was not in partial list")?;
+        self.empty_slabs.insert_front(page_to_move);
 
-        debug_assert!(!self.slabs.contains(page_ptr));
-        debug_assert!(self.empty_slabs.contains(page_ptr));
+        debug_assert!(!self.slabs.contains(page_addr));
+        debug_assert!(self.empty_slabs.contains(page_addr));
+
+        Ok(())
     }
 
-    /// Move a page from `full_slabs` to `slab`.
-    fn move_partial_to_full(&mut self, page: &'a mut P) {
-        let page_ptr = page as *const P;
+    /// Move a page with the starting address `page_addr` from `slab` to `full_slabs`.
+    fn move_partial_to_full(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{ 
+        debug_assert!(self.slabs.contains(page_addr));
+        debug_assert!(!self.full_slabs.contains(page_addr));
 
-        debug_assert!(self.slabs.contains(page_ptr));
-        debug_assert!(!self.full_slabs.contains(page_ptr));
+        let page_to_move = self.slabs.remove_from_list(page_addr).ok_or("move partial to full:: page was not in partial list")?;
+        self.full_slabs.insert_front(page_to_move);
 
-        self.slabs.remove_from_list(page);
-        self.full_slabs.insert_front(page);
-
-        debug_assert!(!self.slabs.contains(page_ptr));
-        debug_assert!(self.full_slabs.contains(page_ptr));
+        debug_assert!(!self.slabs.contains(page_addr));
+        debug_assert!(self.full_slabs.contains(page_addr));
+        Ok(())
     }
 
-    /// Move a page from `full_slabs` to `slab`.
-    fn move_full_to_partial(&mut self, page: &'a mut P) {
-        let page_ptr = page as *const P;
+    /// Move a page with the starting address `page_addr` from `full_slabs` to `slab`.
+    fn move_full_to_partial(&mut self, page_addr: VirtualAddress) -> Result<(), &'static str>{
+        debug_assert!(!self.slabs.contains(page_addr));
+        debug_assert!(self.full_slabs.contains(page_addr));
 
-        debug_assert!(!self.slabs.contains(page_ptr));
-        debug_assert!(self.full_slabs.contains(page_ptr));
+        let page_to_move = self.full_slabs.remove_from_list(page_addr).ok_or("move full to partial:: page was not in full list")?;
+        self.slabs.insert_front(page_to_move);
 
-        self.full_slabs.remove_from_list(page);
-        self.slabs.insert_front(page);
-
-        debug_assert!(self.slabs.contains(page_ptr));
-        debug_assert!(!self.full_slabs.contains(page_ptr));
+        debug_assert!(self.slabs.contains(page_addr));
+        debug_assert!(!self.full_slabs.contains(page_addr));
+        Ok(())
     }
 
     /// Tries to allocate a block of memory with respect to the `layout`.
@@ -194,7 +179,7 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     /// # Arguments
     ///  * `sc_layout`: This is not the original layout but adjusted for the
     ///     SCAllocator size (>= original).
-    fn try_allocate_from_pagelist(&mut self, sc_layout: Layout) -> *mut u8 {
+    fn try_allocate_from_pagelist(&mut self, sc_layout: Layout) -> Result<*mut u8, &'static str> {
         // TODO: Do we really need to check multiple slab pages (due to alignment)
         // If not we can get away with a singly-linked list and have 8 more bytes
         // for the bitfield in an ObjectPage.
@@ -204,10 +189,10 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
             if !ptr.is_null() {
                 if slab_page.is_full() {
                     // trace!("move {:p} partial -> full", slab_page);
-                    self.move_partial_to_full(slab_page);
+                    self.move_partial_to_full(slab_page.start_address())?;
                 }
                 self.allocation_count += 1;
-                return ptr;
+                return Ok(ptr);
             } else {
                 continue;
             }
@@ -218,101 +203,24 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         //     self.check_page_assignments();
         // }
 
-        ptr::null_mut()
+        Ok(ptr::null_mut())
     }
 
-    pub fn heap_id(&self) -> Option<usize> {
-        if let Some(head) = &self.empty_slabs.head {
-            return Some(head.heap_id())
-        }
-        if let Some(head) = &self.slabs.head {
-            return Some(head.heap_id())
-        }
-        if let Some(head) = &self.full_slabs.head {
-            return Some(head.heap_id())
-        }
-
-        None
-    }
-
-    /// removes all of the pages from the lists of `allocator` and adds them to this allocator.
-    pub fn merge(&mut self, allocator: &mut SCAllocator<'a, P>, heap_id: usize) -> Result<(), &'static str> {
-        while !allocator.empty_slabs.is_empty() {
-            match allocator.remove_empty() {
-                Some(new_head) =>{
-                    new_head.set_heap_id(heap_id);
-                    self.empty_slabs.insert_front(new_head)
-                }
-                None => {
-                    break;
-                }
-            }
-        }
-
-        while !allocator.slabs.is_empty() {
-            match allocator.remove_partial() {
-                Some(new_head) =>{
-                    new_head.set_heap_id(heap_id);
-                    self.slabs.insert_front(new_head)
-                }
-                None => {
-                    break;
-                }
-            }
-        }
-
-        while !allocator.full_slabs.is_empty() {
-            match allocator.remove_full() {
-                Some(new_head) =>{
-                    new_head.set_heap_id(heap_id);
-                    self.full_slabs.insert_front(new_head)
-                }
-                None => {
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-
-    }
-
-    /// Creates an allocable page given a MappedPages object and returns a reference to the allocable page.
-    /// The MappedPages object is stored within the metadata of the allocable page.
-    fn create_allocable_page(mp: MappedPages, heap_id: usize) -> Result<&'a mut P, &'static str> {
-        let vaddr = mp.start_address().value();
-
-        // create page and store the MappedPages object
-        let page = P::new(mp, heap_id)?;
-        let page_ref: &'a mut P = unsafe { core::mem::transmute(vaddr) } ; // not unsafe because the allocable page was only create by a mapped page that fit the criteria
-        unsafe { (page_ref as *mut P).write(page); }
-
-        Ok(page_ref) 
-    }
 
     /// Refill the SCAllocator
-    pub fn refill(&mut self, mp: MappedPages, heap_id: usize) -> Result<(), &'static str> {
-        let page = Self::create_allocable_page(mp, heap_id)?;
-        page.bitfield_mut().initialize(self.size, P::SIZE - P::METADATA_SIZE);
-        *page.prev() = Rawlink::none();
-        *page.next() = Rawlink::none();
+    pub fn refill(&mut self,mut mp: MappedPages8k, heap_id: usize) -> Result<(), &'static str> {
+        mp.bitfield_mut().initialize(self.size, MappedPages8k::BUFFER_SIZE);
+        mp.set_heap_id(heap_id);
         // trace!("adding page to SCAllocator {:p}", page);
-        self.insert_empty(page);
+        self.insert_empty(mp);
 
         Ok(())
     }
 
     /// Returns an empty page from the allocator if available.
-    /// It removes the MappedPages object from the heap pages where it is stored.
-    pub fn retrieve_empty_page(&mut self) -> Option<MappedPages> {
-        match self.remove_empty(){
-            Some(page) => {
-                Some(page.retrieve_mapped_pages()) //safe because the page has been removed from the heap's linked lists
-            }
-            None => {
-                None
-            }
-        }
+    /// It removes the MappedPages8k object from the empty page list.
+    pub fn retrieve_empty_page(&mut self) -> Option<MappedPages8k> {
+        self.remove_empty()
     }
 
     /// Allocates a block of memory descriped by `layout`.
@@ -327,28 +235,29 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
         //     "SCAllocator({}) is trying to allocate {:?}, {}",
         //     self.size,
         //     layout, 
-        //     P::SIZE - CACHE_LINE_SIZE
+        //     MappedPages8k::SIZE - CACHE_LINE_SIZE
         // );
+
         assert!(layout.size() <= self.size);
-        assert!(self.size <= (P::SIZE - CACHE_LINE_SIZE));
+        assert!(self.size <= (MappedPages8k::SIZE - CACHE_LINE_SIZE));
         let new_layout = unsafe { Layout::from_size_align_unchecked(self.size, layout.align()) };
         assert!(new_layout.size() >= layout.size());
 
         let ptr = {
             // Try to allocate from partial slabs,
             // if we fail check if we have empty pages and allocate from there
-            let ptr = self.try_allocate_from_pagelist(new_layout);
+            let ptr = self.try_allocate_from_pagelist(new_layout)?;
             if ptr.is_null() && self.empty_slabs.head.is_some() {
                 // Re-try allocation in empty page
-                let empty_page = self.empty_slabs.pop().expect("We checked head.is_some()");
-                debug_assert!(!self.empty_slabs.contains(empty_page));
+                let mut empty_page = self.empty_slabs.pop().expect("We checked head.is_some()");
+                debug_assert!(!self.empty_slabs.contains(empty_page.start_address()));
 
                 let ptr = empty_page.allocate(layout);
                 debug_assert!(!ptr.is_null(), "Allocation must have succeeded here.");
 
                 // trace!(
-                //     "move {:p} empty -> partial empty count {}",
-                //     empty_page,
+                //     "move {:#X} empty -> partial empty count {}",
+                //     empty_page.start_address(),
                 //     self.empty_slabs.elements
                 // );
                 // Move empty page to partial pages
@@ -379,20 +288,26 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
     /// or full -> partial lists.
     pub fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Result<(), &'static str> {
         assert!(layout.size() <= self.size);
-        assert!(self.size <= (P::SIZE - CACHE_LINE_SIZE));
+        assert!(self.size <= (MappedPages8k::SIZE - CACHE_LINE_SIZE));
         // trace!(
         //     "SCAllocator({}) is trying to deallocate ptr = {:p} layout={:?} P.size= {}",
         //     self.size,
         //     ptr,
         //     layout,
-        //     P::SIZE
+        //     MappedPages8k::SIZE
         // );
 
-        let page = (ptr.as_ptr() as usize) & !(P::SIZE - 1) as usize;
+        let page = (ptr.as_ptr() as usize) & !(MappedPages8k::SIZE - 1) as usize;
+        let page_addr = VirtualAddress::new(page)?;
 
-        // Figure out which page we are on and construct a reference to it
-        // TODO: The linked list will have another &mut reference
-        let slab_page = unsafe { mem::transmute::<VAddr, &'a mut P>(page) };
+        // iterate through partial and full page lists to find the MappedPages8k with this starting address
+        let slab_page = self.slabs.iter_mut().find(|mp| mp.start_address() == page_addr)
+            .or_else(|| self.full_slabs.iter_mut().find(|mp| mp.start_address() == page_addr))
+            .expect("The page is not in the full or partial slabs!");
+
+        // // Figure out which page we are on and construct a reference to it
+        // // TODO: The linked list will have another &mut reference
+        // let slab_page = unsafe { mem::transmute::<VAddr, &mut ObjectPage8k>(page) };
         let new_layout = unsafe { Layout::from_size_align_unchecked(self.size, layout.align()) };
 
         let slab_page_was_full = slab_page.is_full();
@@ -401,12 +316,12 @@ impl<'a, P: AllocablePage> SCAllocator<'a, P> {
 
         if slab_page.is_empty(self.obj_per_page) {
             // We need to move it from self.slabs -> self.empty_slabs
-            // trace!("move {:p} partial -> empty", slab_page);
-            self.move_to_empty(slab_page);
+            // trace!("move {:p} {:#X} partial -> empty", slab_page, VirtualAddress::new(page)?);
+            self.move_to_empty(slab_page.start_address())?;
         } else if slab_page_was_full {
             // We need to move it from self.full_slabs -> self.slabs
             // trace!("move {:p} full -> partial", slab_page);
-            self.move_full_to_partial(slab_page);
+            self.move_full_to_partial(slab_page.start_address())?;
         }
 
         ret
